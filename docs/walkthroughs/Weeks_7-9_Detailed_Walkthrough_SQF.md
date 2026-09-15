@@ -757,10 +757,17 @@ Build a small reference set: for 5-8 SKUs, write what a good recommendation shou
 ```python
 """Week 7 Day 6: Agent outcome evaluation."""
 import json
+import sys
 from pathlib import Path
+
 from anthropic import Anthropic
 
-from agent import run_agent
+# Running `python evals/agent_eval.py` puts evals/ on sys.path, not the project
+# root, so `import agent` fails. This project has no [build-system], so uv never
+# installs it into the venv and there is nothing else putting the root on the
+# path. Same bootstrap as the Week 4 evals/ modules.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from agent import run_agent  # noqa: E402
 
 client = Anthropic()
 
@@ -819,7 +826,7 @@ if __name__ == "__main__":
         print(f"  reasoning: {scores['reasoning']}")
 ```
 
-Run it:
+Run it **from the project root** - `mock_data.json` in `tools.py` is a relative path, so running from inside `evals/` finds no data even once the import resolves:
 
 ```bash
 uv run python evals/agent_eval.py
