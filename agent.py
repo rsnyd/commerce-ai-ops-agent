@@ -4,6 +4,8 @@ import json
 from anthropic import Anthropic
 
 import tools
+# At the top of agent.py
+from guardrail import apply_brand_guardrail
 
 MODEL = "claude-sonnet-4-6"
 
@@ -58,7 +60,6 @@ first to learn the product name and state, then gather competitor and review dat
 Base every claim on tool data. Do not invent numbers. Keep the final recommendation under
 150 words. Use plain hyphens, never em dashes."""
 
-
 def run_agent(sku: str, max_turns: int = 8) -> str:
     client = Anthropic()
     messages = [{"role": "user", "content": f"Produce a merchandising recommendation for SKU {sku}."}]
@@ -71,6 +72,13 @@ def run_agent(sku: str, max_turns: int = 8) -> str:
             tools=TOOL_SCHEMAS,
             messages=messages,
         )
+        
+        if response.stop_reason == "end_turn":
+            raw = response.content[0].text
+            check = apply_brand_guardrail(raw)
+            if not check["passes"]:
+                print(f"  [guardrail] violations: {check['violations']}")
+            return check["revised_text"]  # always return the (possibly revised) text
 
         if response.stop_reason == "end_turn":
             # Final answer
