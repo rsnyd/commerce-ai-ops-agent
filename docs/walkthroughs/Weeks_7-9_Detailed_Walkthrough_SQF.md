@@ -486,40 +486,254 @@ git commit -m "Day 4 (wk7): brand-voice guardrail (evaluator-optimizer gate)"
 
 ## Day 5 (Fri): Add Observability (Langfuse)
 
-### Project: Instrument the agent
+You did this for RAG in Week 4; same SDK, and the trace tree is the deliverable again. But an agent is not a RAG query with more steps, and two things about it change what you have to instrument.
 
-You did this for RAG in Week 4; same pattern. Wrap the agent loop, each tool call, and the guardrail with Langfuse so every run is a traceable, costable, debuggable session.
+### Concept: The interesting spans are the ones you didn't write a loop for
+
+In Week 4 every model call was visible in `ask.py`. Here, only three of the five are in the agent loop. `get_review_sentiment` makes a Haiku call *inside a tool*, and the guardrail makes a Sonnet call *after* the loop exits. Instrument only `run_agent` and the trace looks complete while under-reporting the run's cost by a third.
+
+The rule that falls out of that: every Anthropic call in the project goes through one traced helper, and no module calls `client.messages.create` directly. That is what `observability.py` below is for.
+
+### Concept: Cost is not free with the span
+
+Langfuse computes the dollar figure from two fields on a **generation** span: `model` and `usage_details`. A span that records only start and end time shows `$0.00` - which looks identical to "this call was cheap" and is the single most common way this exercise silently fails.
+
+### Correction: the v2 API does not exist in Langfuse 4.x
+
+Most Langfuse tutorials still show this, and earlier drafts of this walkthrough did too:
 
 ```python
-# In agent.py
-from langfuse.decorators import observe, langfuse_context
-
-@observe()
-def run_agent(sku: str, max_turns: int = 8) -> str:
-    langfuse_context.update_current_observation(input={"sku": sku})
-    # ... existing loop, but wrap each tool execution ...
-    for block in response.content:
-        if block.type == "tool_use":
-            fn = TOOL_FUNCTIONS[block.name]
-            result = call_tool(block.name, fn, block.input)  # traced helper
-            # ...
-
-@observe()
-def call_tool(name, fn, kwargs):
-    langfuse_context.update_current_observation(
-        metadata={"tool": name}, input=kwargs
-    )
-    result = fn(**kwargs)
-    langfuse_context.update_current_observation(output=result)
-    return result
+from langfuse.decorators import observe, langfuse_context   # v2 - DOES NOT IMPORT
+langfuse_context.update_current_observation(input=...)
 ```
 
-Run a few SKUs, then open Langfuse. You'll see each agent run as a trace with nested spans: the orchestrator model calls, each tool execution, and the guardrail. Find the total cost per run and the total latency. An agent makes many more model calls than a single RAG query, so this is where you internalize that agents are expensive - a fact you'll cite in interviews.
+`langfuse.decorators` was removed in v3. On the version this project pins (`langfuse>=4.15.2`) that import raises `ModuleNotFoundError` before any of your code runs. The v4 equivalents, which is what Weeks 3-4 already use:
+
+| v2 (obsolete) | v4 (current) |
+|---|---|
+| `from langfuse.decorators import observe` | `from langfuse import observe` |
+| `langfuse_context.update_current_observation(...)` | `langfuse.update_current_span(...)` on the `get_client()` singleton |
+| n/a | `langfuse.update_current_generation(...)` for model-call fields |
+| n/a | `@observe(as_type="agent" \| "tool" \| "guardrail")` |
+
+`as_type` is new and worth using: it gives the agent span, the tool spans and the guardrail distinct observation types in the UI, so you can filter on "show me the guardrail calls" instead of reading names.
+
+### Project: `observability.py` - one place every model call goes through
+
+```python
+"""Week 7 Day 5: Langfuse instrumentation shared by the agent, the tools and the guardrail."""
+import env  # noqa: F401  - import-time load of LANGFUSE_* and ANTHROPIC_API_KEY
+
+from langfuse import get_client
+
+langfuse = get_client()
+
+# USD per million tokens, from the Anthropic pricing table.
+PRICES_PER_MTOK = {
+    "claude-sonnet-4-6": {"input": 3.00, "output": 15.00},
+    "claude-haiku-4-5": {"input": 1.00, "output": 5.00},
+}
+
+
+def _usage_details(usage) -> dict:
+    """Anthropic usage -> Langfuse usage_details.
+
+    `input_tokens` from Anthropic already excludes anything served from or written
+    to the prompt cache, so the cache counts are additional keys rather than a
+    subset - Langfuse sums the values for the displayed total and that stays correct.
+    """
+    details = {"input": usage.input_tokens, "output": usage.output_tokens}
+    cache_read = getattr(usage, "cache_read_input_tokens", None)
+    cache_write = getattr(usage, "cache_creation_input_tokens", None)
+    if cache_read:
+        details["cache_read_input_tokens"] = cache_read
+    if cache_write:
+        details["cache_creation_input_tokens"] = cache_write
+    return details
+
+
+def _cost_details(model: str, usage_details: dict) -> dict | None:
+    """Price one call, or None if the model is not in PRICES_PER_MTOK."""
+    # response.model is the resolved snapshot ("claude-sonnet-4-6-20250929"), so
+    # match on prefix rather than requiring an exact key.
+    price = next(
+        (p for alias, p in PRICES_PER_MTOK.items() if model.startswith(alias)), None
+    )
+    if price is None:
+        return None
+    cached_read = usage_details.get("cache_read_input_tokens", 0)
+    cached_write = usage_details.get("cache_creation_input_tokens", 0)
+    input_cost = (
+        usage_details["input"] * price["input"]
+        + cached_read * price["input"] * 0.10   # cache reads bill at 0.1x
+        + cached_write * price["input"] * 1.25  # cache writes bill at 1.25x
+    ) / 1_000_000
+    output_cost = usage_details["output"] * price["output"] / 1_000_000
+    return {"input": input_cost, "output": output_cost}
+
+
+def traced_messages_create(client, *, span_name: str, **kwargs):
+    """Call client.messages.create(**kwargs) inside a Langfuse generation span."""
+    with langfuse.start_as_current_observation(
+        name=span_name,
+        as_type="generation",
+        model=kwargs["model"],
+        model_parameters={"max_tokens": kwargs.get("max_tokens")},
+        input={"system": kwargs.get("system"), "messages": kwargs["messages"]},
+    ) as generation:
+        response = client.messages.create(**kwargs)
+        usage_details = _usage_details(response.usage)
+        generation.update(
+            # The resolved snapshot id, not the alias we sent.
+            model=response.model,
+            output=[block.model_dump() for block in response.content],
+            usage_details=usage_details,
+            cost_details=_cost_details(response.model, usage_details),
+            metadata={"stop_reason": response.stop_reason},
+        )
+        return response
+```
+
+**Why price the spans here instead of letting Langfuse do it.** Langfuse can map cost from the model name against its own price list, but that list lags new model IDs and returns a blank cost when it misses - indistinguishable from broken instrumentation. Pricing here means the number is right on day one. Drop `PRICES_PER_MTOK` and stop passing `cost_details` if you'd rather rely on the catalog.
+
+**Dependency note.** `env.py` was carried over from the Week 4 project but its dependency was not. Add it or the first run dies on `ModuleNotFoundError: No module named 'dotenv'`:
+
+```bash
+uv add python-dotenv
+```
+
+### Project: Instrument `agent.py`
+
+There is no `call_tool` helper anywhere in Langfuse - you write it. The point of the refactor is that the tool execution currently inlined in the loop (`result = fn(**block.input)`) moves into a single function, so one wrapper covers all three tools:
+
+```python
+from langfuse import observe
+
+from observability import langfuse, traced_messages_create
+
+
+def run_requested_tool(block) -> dict:
+    """Execute one tool_use block the model emitted, as its own Langfuse span."""
+    fn = TOOL_FUNCTIONS[block.name]
+    with langfuse.start_as_current_observation(
+        name=block.name, as_type="tool", input=block.input
+    ) as span:
+        result = fn(**block.input)
+        span.update(output=result)
+        return result
+
+
+@observe(name="merchandising-agent", as_type="agent")
+def run_agent(sku: str, max_turns: int = 8) -> str:
+    # @observe already captures sku/max_turns as the span input. The metadata is
+    # what makes a run findable later - Langfuse filters traces on metadata, not
+    # on the input blob.
+    langfuse.update_current_span(metadata={"sku": sku, "orchestrator_model": MODEL})
+    # get_trace_url() reads the *currently active* span, so it only works in here -
+    # called from __main__ after the agent span has closed it returns None.
+    print(f"  [langfuse] {langfuse.get_trace_url()}")
+
+    client = Anthropic()
+    messages = [...]
+
+    for turn in range(max_turns):
+        response = traced_messages_create(
+            client,
+            span_name=f"orchestrator-turn-{turn + 1}",
+            model=MODEL,
+            max_tokens=1500,
+            system=SYSTEM_PROMPT,
+            tools=TOOL_SCHEMAS,
+            messages=messages,
+        )
+        # ... loop unchanged, except the tool execution ...
+        for block in response.content:
+            if block.type == "tool_use":
+                result = run_requested_tool(block)
+                # ...
+```
+
+Two decisions worth understanding, because they're the ones you'd get wrong:
+
+1. **Don't decorate the tool functions in `tools.py`.** It's the obvious reading of the old snippet and it's wrong here - three decorators to keep in sync, and `tools.py` ends up importing an observability stack it otherwise has no use for. One dispatcher in `agent.py` covers all three.
+2. **`run_requested_tool` uses a context manager, not `@observe`.** The span has to be named after the tool the model actually asked for. A decorator would name every span `run_requested_tool` and the trace tree becomes three identical rows.
+
+While you're in the loop: delete the duplicate `if response.stop_reason == "end_turn":` block. Day 4 added the guardrail version above the original without removing it, so the second one has been unreachable since.
+
+Finally, in `__main__`:
+
+```python
+    langfuse.flush()
+```
+
+The SDK exports spans on a background thread. A short script can exit before the batch is sent, which looks exactly like "the instrumentation didn't work."
+
+### Project: The two calls that are easy to miss
+
+In `tools.py`, the Haiku call inside `get_review_sentiment`:
+
+```python
+from observability import traced_messages_create
+
+    resp = traced_messages_create(
+        client,
+        span_name="sentiment-summary",
+        model="claude-haiku-4-5",
+        max_tokens=256,
+        messages=[...],
+    )
+```
+
+In `guardrail.py`, the Sonnet call - and the function itself, so the gate gets its own observation type:
+
+```python
+from langfuse import observe
+
+from observability import traced_messages_create
+
+
+@observe(name="brand-guardrail", as_type="guardrail")
+def apply_brand_guardrail(text: str) -> dict:
+    client = Anthropic()
+    resp = traced_messages_create(
+        client,
+        span_name="guardrail-check",
+        model="claude-sonnet-4-6",
+        # ... rest unchanged ...
+    )
+```
+
+### What you should see
+
+Run a few SKUs. One run is one trace:
+
+```
+merchandising-agent                     AGENT       (the whole run)
+  orchestrator-turn-1                   GENERATION  Sonnet decides what to call
+  get_internal_metrics                  TOOL
+  orchestrator-turn-2                   GENERATION
+  get_competitor_prices                 TOOL
+  get_review_sentiment                  TOOL
+    sentiment-summary                   GENERATION  Haiku, nested inside the tool
+  orchestrator-turn-3                   GENERATION  writes the recommendation
+  brand-guardrail                       GUARDRAIL
+    guardrail-check                     GENERATION  Sonnet checks brand voice
+```
+
+Five model calls to answer one question. That nesting is the lesson: `sentiment-summary` sitting *under* a tool span is the cost you would never have found by reading `agent.py`. An agent makes many more model calls than a single RAG query - this is where you internalize that agents are expensive, a fact you'll cite in interviews.
+
+Find the total cost and total latency on the root span, then compare the sum of the three `orchestrator-turn-*` spans against the total. The orchestrator is not where the money goes.
+
+### If the trace is empty or costs $0.00
+
+- **No trace at all** - missing `langfuse.flush()`, or bad `LANGFUSE_*` credentials. The SDK fails per-span on a background thread, so a wrong key produces a normal-looking run that sent nothing. Week 4's `tracing.py` guards this with a startup auth check; `observability.py` here does not, so verify with `get_client().auth_check()` if a run goes missing.
+- **Spans present, cost `$0.00`** - `usage_details` or `model` isn't reaching the span. Check you're on the *generation* path (`as_type="generation"`), not a plain span.
+- **Querying traces from a script 404s** - if your Langfuse server runs in v4 `events_only` mode, the v3 `GET /api/public/traces` endpoint is gone. Use `GET /api/public/v2/observations?fromStartTime=<from>&toStartTime=<to>`. Note that endpoint returns a slim projection without `model`/`usage`, so it will show zeros even when the data is fine - trust the UI.
 
 Commit:
 
 ```bash
-git add agent.py
+git add observability.py agent.py tools.py guardrail.py pyproject.toml uv.lock
 git commit -m "Day 5 (wk7): Langfuse tracing across agent loop, tools, and guardrail"
 ```
 
@@ -610,6 +824,18 @@ Run it:
 ```bash
 uv run python evals/agent_eval.py
 ```
+
+The judge is shown untraced above to keep the eval logic in one piece. Day 5's rule still applies, though - swap it for the traced helper so judge cost lands in Langfuse alongside the agent cost, which is the only way to see what an eval sweep actually costs you:
+
+```python
+from observability import traced_messages_create
+
+    resp = traced_messages_create(
+        client, span_name="judge", model="claude-sonnet-4-6", max_tokens=512, ...
+    )
+```
+
+Each `run_agent(sku)` here produces its own trace. If you'd rather see one trace per eval sweep, wrap the loop in `langfuse.propagate_attributes(session_id=...)` and the per-SKU traces group into a session.
 
 Read the results. Where the agent scores low, look at the Langfuse trace for that run to see whether it was a tool problem (wrong data) or a reasoning problem (good data, weak recommendation).
 
@@ -965,15 +1191,15 @@ You now have the agent three ways: raw SDK, LangGraph (prebuilt + custom), CrewA
 
 Adapt your Week 7 `agent_eval.py` to also run the LangGraph version. Compare outcome scores, but more importantly build the comparison table for your writeup:
 
-| Dimension | Raw SDK | LangGraph | CrewAI |
-|-----------|---------|-----------|--------|
-| Lines of code | ~120 | ~40 (prebuilt) / ~80 (custom) | ~40 |
-| Control over flow | total | high | medium |
-| Built-in tool loop | no (you wrote it) | yes | yes |
-| Custom guardrail node | manual | clean (graph node) | awkward |
-| Multi-agent native | no | possible | yes (core) |
-| Debuggability | high | medium | lower |
-| Best for | understanding, perf-critical | production agents | role-based teams |
+| Dimension             | Raw SDK                      | LangGraph                     | CrewAI           |
+| --------------------- | ---------------------------- | ----------------------------- | ---------------- |
+| Lines of code         | ~120                         | ~40 (prebuilt) / ~80 (custom) | ~40              |
+| Control over flow     | total                        | high                          | medium           |
+| Built-in tool loop    | no (you wrote it)            | yes                           | yes              |
+| Custom guardrail node | manual                       | clean (graph node)            | awkward          |
+| Multi-agent native    | no                           | possible                      | yes (core)       |
+| Debuggability         | high                         | medium                        | lower            |
+| Best for              | understanding, perf-critical | production agents             | role-based teams |
 
 ### The interview insight to internalize
 

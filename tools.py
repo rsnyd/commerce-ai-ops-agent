@@ -5,6 +5,8 @@ from pathlib import Path
 import httpx
 from anthropic import Anthropic
 
+from observability import traced_messages_create
+
 # Mock internal data standing in for Drupal Commerce + Yotpo.
 # In production these would be live API calls.
 MOCK_DATA = Path("mock_data.json")
@@ -70,10 +72,16 @@ def get_review_sentiment(sku: str) -> dict:
     reviews = data[sku]["reviews"]
     avg_rating = sum(r["rating"] for r in reviews) / len(reviews)
 
-    # Use a cheap model to summarize sentiment themes
+    # Use a cheap model to summarize sentiment themes.
+    # This is the hidden model call in the agent - it is inside a tool, so it never
+    # shows up in the orchestrator loop. Routing it through traced_messages_create
+    # nests it under the get_review_sentiment tool span, which is the whole reason
+    # a per-run cost figure ends up matching the bill.
     client = Anthropic()
     review_text = "\n".join(f"[{r['rating']}/5] {r['text']}" for r in reviews)
-    resp = client.messages.create(
+    resp = traced_messages_create(
+        client,
+        span_name="sentiment-summary",
         model="claude-haiku-4-5",
         max_tokens=256,
         messages=[{

@@ -12,5 +12,6 @@ dependencies = [
     "langfuse>=4.15.2",
     "langgraph>=1.2.11",
     "pydantic>=2.13.5",
+    "python-dotenv>=1.2.3",
     "rich>=15.0.0",
 ]

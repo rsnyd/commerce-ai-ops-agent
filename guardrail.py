@@ -1,5 +1,8 @@
 """Week 7 Day 4: Brand-voice guardrail as an evaluator-optimizer gate."""
 from anthropic import Anthropic
+from langfuse import observe
+
+from observability import traced_messages_create
 
 BRAND_RULES = """Spices Inc brand voice:
 - Warm, expert, never patronizing. Concrete before evocative.
@@ -22,9 +25,14 @@ CHECK_TOOL = {
 }
 
 
+# as_type="guardrail" gives this its own observation type in Langfuse rather than a
+# generic span, so the brand-voice gate is filterable separately from the tool calls.
+@observe(name="brand-guardrail", as_type="guardrail")
 def apply_brand_guardrail(text: str) -> dict:
     client = Anthropic()
-    resp = client.messages.create(
+    resp = traced_messages_create(
+        client,
+        span_name="guardrail-check",
         model="claude-sonnet-4-6",
         max_tokens=1024,
         system=f"You check text against brand-voice rules and fix violations.\n\n{BRAND_RULES}",
