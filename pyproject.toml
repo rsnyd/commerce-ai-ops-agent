@@ -6,12 +6,13 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "anthropic>=1.5.0",
+    "crewai>=1.15",
     "httpx>=0.28.1",
     "langchain>=1.4.0",
     "langchain-anthropic>=1.7.1",
     "langfuse>=4.15.2",
     "langgraph>=1.2.11",
-    "pydantic>=2.13.5",
+    "pydantic>=2.11.9,<2.13",
     "python-dotenv>=1.2.3",
-    "rich>=15.0.0",
+    "rich>=13.7.0,<15",
 ]
