@@ -1,7 +1,7 @@
 """Week 8 Day 9: Commerce agent using LangGraph's prebuilt ReAct agent."""
+from langchain.agents import create_agent
 from langchain.chat_models import init_chat_model
 from langchain_core.tools import tool
-from langgraph.prebuilt import create_react_agent
 
 import sys
 sys.path.insert(0, "..")
@@ -33,10 +33,10 @@ inventory, and a promotional angle in under 150 words. Ground every claim in too
 data. Use plain hyphens, never em dashes."""
 
 model = init_chat_model("claude-sonnet-4-6", temperature=0)
-agent = create_react_agent(
+agent = create_agent(
     model,
     tools=[get_internal_metrics, get_competitor_prices, get_review_sentiment],
-    prompt=SYSTEM,
+    system_prompt=SYSTEM,
 )
 
 

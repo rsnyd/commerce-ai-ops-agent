@@ -1,0 +1,42 @@
+{
+  "GM-001": {
+    "name": "Garam Masala",
+    "inventory": 42,
+    "units_sold_30d": 137,
+    "avg_daily_sales": 4.6,
+    "current_price": 8.99,
+    "reorder_point": 30,
+    "reviews": [
+      {
+        "rating": 5,
+        "text": "Best garam masala I've found. Fresh and aromatic."
+      },
+      {
+        "rating": 4,
+        "text": "Good but the jar arrived half full once."
+      },
+      {
+        "rating": 5,
+        "text": "Use it weekly. Warm and balanced."
+      }
+    ]
+  },
+  "BB-002": {
+    "name": "Berbere",
+    "inventory": 12,
+    "units_sold_30d": 88,
+    "avg_daily_sales": 2.9,
+    "current_price": 9.49,
+    "reorder_point": 20,
+    "reviews": [
+      {
+        "rating": 5,
+        "text": "Authentic heat, complex. Great for doro wat."
+      },
+      {
+        "rating": 3,
+        "text": "Hotter than expected."
+      }
+    ]
+  }
+}

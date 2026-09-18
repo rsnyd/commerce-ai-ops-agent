@@ -413,10 +413,28 @@ A guardrail is a check applied to the model's output before it's returned. The s
 
 For our agent, the guardrail checks that the recommendation's promotional language matches Spices Inc brand voice (no forbidden words, hyphens not em dashes, concrete not hype).
 
+### Concept: Don't ask the model to do a regex's job
+
+Read the brand rules below and notice that they are not all the same kind of rule. "No forbidden words" and "plain hyphens, never em dashes" are exact string matches - a scan either finds the character or it doesn't. "Concrete before evocative" and "specific about heat, not vague" are judgment calls that no regex will ever make.
+
+Hand the exact-match rules to the model anyway and you get the worst of both. Asked to check dashes, Sonnet flagged plain hyphens as em dashes, then argued with itself inside the output:
+
+```
+"Em dash used instead of a plain hyphen ('justified - hold' uses a plain hyphen
+correctly, but... re-examining: the Pricing section uses ' - ' which are plain
+hyphens, so this is acceptable)."
+```
+
+It also reported the same forbidden word once per occurrence, so a draft using "premium" twice produced two identical violations. That list is what you print to the console and read in Langfuse - it has to stay scannable.
+
+So split the work by what each half is actually good at: a string scan owns the mechanical rules and is never wrong about them; the model owns the judgment calls and is told not to touch the mechanical ones. The scan's findings are passed into the prompt so the revision still fixes everything in one pass. This is worth doing deliberately - "use the LLM for the part that needs judgment, and ordinary code for the part that doesn't" is the single most transferable lesson in this week.
+
 ### Project: Add `guardrail.py` and wire it in
 
 ```python
 """Week 7 Day 4: Brand-voice guardrail as an evaluator-optimizer gate."""
+import re
+
 from anthropic import Anthropic
 
 BRAND_RULES = """Spices Inc brand voice:
@@ -425,35 +443,88 @@ BRAND_RULES = """Spices Inc brand voice:
 - Preferred: well-made, carefully sourced, small batch, honest, fresh-ground.
 - Plain hyphens, never em dashes. Specific about heat (mild, building, sharp), not vague."""
 
+# Stems, not whole words, so "elevated" and "curating" are caught too.
+FORBIDDEN_STEMS = ["elevat", "premium", "artisanal", "gourmet", "curat", "luxurious", "decadent"]
+DASHES = {"—": "em dash", "–": "en dash"}
+
+
+def scan_exact_rules(text: str) -> list[str]:
+    """Check the rules that are pure string matching. One entry per distinct violation."""
+    violations = []
+    for stem in FORBIDDEN_STEMS:
+        match = re.search(rf"\b{stem}\w*", text, re.IGNORECASE)
+        if match:
+            violations.append(f'forbidden word: "{match.group()}"')
+    for char, name in DASHES.items():
+        if char in text:
+            violations.append(f'{name} instead of plain hyphen: "{char}"')
+    return violations
+
+
+REPORTING_RULES = """How to report:
+- Dashes and forbidden words are already checked in code. Never report those - just fix
+  every occurrence of the ones listed below in your revised text.
+- Report only judgment calls: patronizing or hype tone, evocative language that arrives
+  before anything concrete, vague sensory description where a specific one belongs.
+- One entry per distinct phrase. If two rules describe the same phrase, report it once
+  under the rule that fits best.
+- Format each entry as `rule broken: "exact quote"`, 15 words max. The entry ends at the
+  closing quote - never append an explanation of why it is wrong.
+- Only report what you can quote verbatim. If you cannot quote it, it is not a violation.
+- No reasoning, hedging, or self-correction in an entry. Decide first, then report.
+- Judge the text only against the rules above, as they apply to what the text actually
+  says. Do not require content the text was never meant to include.
+- If nothing breaks a rule, return an empty list."""
+
 CHECK_TOOL = {
     "name": "report_check",
-    "description": "Report whether the text passes brand-voice rules and provide a fix if not.",
+    "description": "Report brand-voice judgment violations and return the corrected text.",
     "input_schema": {
         "type": "object",
         "properties": {
-            "passes": {"type": "boolean"},
-            "violations": {"type": "array", "items": {"type": "string"}},
-            "revised_text": {"type": "string", "description": "If it fails, the corrected text. If it passes, echo the original."},
+            "violations": {
+                "type": "array",
+                "maxItems": 4,
+                "items": {
+                    "type": "string",
+                    "description": 'One distinct judgment violation as `rule broken: "exact quote"`, 15 words max. No reasoning.',
+                },
+            },
+            "revised_text": {"type": "string", "description": "The full text with every violation fixed, keeping the original sections and structure. If nothing needs fixing, echo the original exactly."},
         },
-        "required": ["passes", "violations", "revised_text"],
+        "required": ["violations", "revised_text"],
     },
 }
 
 
 def apply_brand_guardrail(text: str) -> dict:
+    exact_violations = scan_exact_rules(text)
+    found = "\n".join(f"- {v}" for v in exact_violations) or "- none"
+
     client = Anthropic()
     resp = client.messages.create(
         model="claude-sonnet-4-6",
         max_tokens=1024,
-        system=f"You check text against brand-voice rules and fix violations.\n\n{BRAND_RULES}",
+        system=f"You check text against brand-voice rules and fix violations.\n\n{BRAND_RULES}\n\n{REPORTING_RULES}",
         tools=[CHECK_TOOL],
         tool_choice={"type": "tool", "name": "report_check"},
-        messages=[{"role": "user", "content": f"Check this recommendation:\n\n{text}"}],
+        messages=[{"role": "user", "content": f"A code scan already found these violations to fix:\n{found}\n\nCheck this recommendation:\n\n{text}"}],
     )
     for block in resp.content:
         if block.type == "tool_use":
-            return block.input
+            result = block.input
+            violations = exact_violations + result["violations"]
+            return {
+                "passes": not violations,
+                "violations": violations,
+                "revised_text": result["revised_text"],
+            }
+    # tool_choice forces the tool, so this is unreachable in practice - but callers index
+    # into the result, so fail open with the original text rather than returning None.
+    return {"passes": not exact_violations, "violations": exact_violations, "revised_text": text}
 ```
+
+Two details worth copying into your own guardrails. `passes` is now derived (`not violations`) rather than something the model asserts separately - the model could previously return `passes: true` alongside a non-empty violations list, and callers branch on that flag. And the `maxItems: 4` cap plus the 15-word limit in the item description do real work: schema descriptions are instructions the model follows, not documentation for you.
 
 Wire it into `agent.py`:
 
@@ -473,7 +544,20 @@ def run_agent(sku: str, max_turns: int = 8) -> str:
     # ... rest unchanged ...
 ```
 
-Test it by temporarily making the system prompt produce a violation (e.g., add "use the word 'premium' once" to the system prompt), run, and confirm the guardrail catches and fixes it. Then remove that test instruction.
+Test the scan first - it is ordinary code, so test it like ordinary code:
+
+```python
+from guardrail import scan_exact_rules
+
+assert scan_exact_rules("**Pricing** - hold at $8.99") == []          # plain hyphens are fine
+assert scan_exact_rules("justified — hold") == ['em dash instead of plain hyphen: "—"']
+assert scan_exact_rules("accurate fill weights") == []                # "accurate" is not "curat"
+assert len(scan_exact_rules("the premium is justified. Premium wins.")) == 1   # deduped
+```
+
+That last one is the case the model kept getting wrong. Then test the whole gate by temporarily making the system prompt produce a violation (e.g., add "use the word 'premium' once" to the system prompt), run, and confirm the guardrail catches and fixes it. Then remove that test instruction.
+
+Run a clean draft through it too, and confirm you get `passes: True` with an empty list. A guardrail that invents violations on good text is worse than no guardrail - you stop trusting the output and start ignoring it.
 
 Commit:
 
@@ -509,12 +593,12 @@ langfuse_context.update_current_observation(input=...)
 
 `langfuse.decorators` was removed in v3. On the version this project pins (`langfuse>=4.15.2`) that import raises `ModuleNotFoundError` before any of your code runs. The v4 equivalents, which is what Weeks 3-4 already use:
 
-| v2 (obsolete) | v4 (current) |
-|---|---|
-| `from langfuse.decorators import observe` | `from langfuse import observe` |
+| v2 (obsolete)                                        | v4 (current)                                                            |
+| ---------------------------------------------------- | ----------------------------------------------------------------------- |
+| `from langfuse.decorators import observe`          | `from langfuse import observe`                                        |
 | `langfuse_context.update_current_observation(...)` | `langfuse.update_current_span(...)` on the `get_client()` singleton |
-| n/a | `langfuse.update_current_generation(...)` for model-call fields |
-| n/a | `@observe(as_type="agent" \| "tool" \| "guardrail")` |
+| n/a                                                  | `langfuse.update_current_generation(...)` for model-call fields       |
+| n/a                                                  | `@observe(as_type="agent" \| "tool" \| "guardrail")`                    |
 
 `as_type` is new and worth using: it gives the agent span, the tool spans and the guardrail distinct observation types in the UI, so you can filter on "show me the guardrail calls" instead of reading names.
 
@@ -694,6 +778,9 @@ from observability import traced_messages_create
 
 @observe(name="brand-guardrail", as_type="guardrail")
 def apply_brand_guardrail(text: str) -> dict:
+    exact_violations = scan_exact_rules(text)
+    found = "\n".join(f"- {v}" for v in exact_violations) or "- none"
+
     client = Anthropic()
     resp = traced_messages_create(
         client,
@@ -861,7 +948,7 @@ git commit -m "Day 6 (wk7): agent outcome evaluation with reference expectations
 
 Write a strong `README.md`:
 
-```markdown
+````markdown
 # Commerce AI Ops Agent
 
 A multi-tool agent that produces merchandising recommendations for an
@@ -874,7 +961,7 @@ then reimplemented in LangGraph for comparison (see `langgraph_version/`).
 
 ## Architecture
 
-\`\`\`mermaid
+```mermaid
 graph TD
     SKU[Product SKU] --> O[Orchestrator LLM]
     O -->|tool| M[get_internal_metrics]
@@ -886,15 +973,15 @@ graph TD
     O --> REC[Draft recommendation]
     REC --> G[Brand-voice guardrail]
     G --> OUT[Final recommendation]
-\`\`\`
+```
 
 ## Run
 
-\`\`\`bash
+```bash
 uv sync
 export ANTHROPIC_API_KEY=...
 uv run python agent.py GM-001
-\`\`\`
+```
 
 ## Evaluation
 
@@ -907,7 +994,7 @@ Outcome evaluation against per-SKU reference expectations. See `evals/`.
 - Evaluator-optimizer guardrail for output quality
 - Full Langfuse observability (cost and latency per run)
 - Outcome + light trajectory evaluation
-```
+````
 
 Record a 30-60 second screen capture of the agent running (no voiceover needed - the tool trace tells the story) and link it in the README.
 
@@ -949,11 +1036,11 @@ The key LangGraph concepts:
 - **State**: a typed dict carried through the graph. Each node reads and updates it.
 - **Nodes**: functions that take state and return updated state.
 - **Edges**: transitions. Fixed edges always fire; conditional edges branch based on state.
-- **The prebuilt ReAct agent**: LangGraph ships `create_react_agent`, a ready-made tool-calling agent loop. You can use it directly or build your own graph.
+- **The prebuilt ReAct agent**: LangChain ships `create_agent`, a ready-made tool-calling agent loop. You can use it directly or build your own graph. (In LangGraph 0.x this was `create_react_agent` from `langgraph.prebuilt`; it moved in 1.0 and the old import now warns.)
 
 ### Concept: Two ways to build the LangGraph agent
 
-1. **Prebuilt** (`create_react_agent`): fastest, least code. Good for standard tool-calling agents. You hand it a model and tools, it runs the loop.
+1. **Prebuilt** (`create_agent`): fastest, least code. Good for standard tool-calling agents. You hand it a model and tools, it runs the loop.
 2. **Custom graph**: explicit nodes for orchestration, guardrail, etc. More code, more control. Good when you need custom flow.
 
 You'll do the prebuilt version first (Day 9, fast win) then a custom graph (Day 10) so you understand both.
@@ -961,7 +1048,7 @@ You'll do the prebuilt version first (Day 9, fast win) then a custom graph (Day 
 ### Reading (1 hour)
 
 - LangGraph quickstart and agent concepts: https://langchain-ai.github.io/langgraph/
-- LangGraph `create_react_agent` reference - search the docs for "prebuilt ReAct agent"
+- LangChain `create_agent` reference - search the docs for "prebuilt ReAct agent"
 
 No commit today.
 
@@ -973,9 +1060,9 @@ No commit today.
 
 ```python
 """Week 8 Day 9: Commerce agent using LangGraph's prebuilt ReAct agent."""
+from langchain.agents import create_agent
 from langchain.chat_models import init_chat_model
 from langchain_core.tools import tool
-from langgraph.prebuilt import create_react_agent
 
 import sys
 sys.path.insert(0, "..")
@@ -1007,10 +1094,10 @@ inventory, and a promotional angle in under 150 words. Ground every claim in too
 data. Use plain hyphens, never em dashes."""
 
 model = init_chat_model("claude-sonnet-4-6", temperature=0)
-agent = create_react_agent(
+agent = create_agent(
     model,
     tools=[get_internal_metrics, get_competitor_prices, get_review_sentiment],
-    prompt=SYSTEM,
+    system_prompt=SYSTEM,
 )
 
 
@@ -1031,7 +1118,11 @@ cd langgraph_version
 uv run python agent_prebuilt.py GM-001
 ```
 
+After this run you'll find a new `langgraph_version/mock_data.json`. `tools.py` resolves `Path("mock_data.json")` against the directory you run from, not against `tools.py`, and seeds a fresh file when it finds none. It's identical to the root copy today, so there's nothing to commit - but it won't follow the root file. If you later add SKUs to `mock_data.json` at the repo root, the LangGraph versions will keep reading their own stale copy until you delete it.
+
 Notice how little code this is compared to your raw loop. The prebuilt agent handles the tool-calling loop for you. That's the framework value: standard patterns become a few lines.
+
+Framework churn is part of that bargain. This agent builder used to be `create_react_agent` from `langgraph.prebuilt`; in LangGraph 1.0 it moved to `create_agent` in `langchain.agents` and its `prompt` argument became `system_prompt`. If you are on an older install you will see a `LangGraphDeprecatedSinceV10` warning pointing at the new import. The raw-SDK version you wrote in week 7 needed no such migration - that is a real trade-off to name when you compare the two, not just a footnote.
 
 Commit:
 
@@ -1052,8 +1143,8 @@ The prebuilt agent doesn't include your brand-voice guardrail. Build a custom gr
 """Week 8 Day 10: Custom LangGraph graph - agent node + guardrail node."""
 from typing import TypedDict
 from langchain.chat_models import init_chat_model
+from langchain.agents import create_agent
 from langgraph.graph import StateGraph, START, END
-from langgraph.prebuilt import create_react_agent
 
 import sys
 sys.path.insert(0, "..")
@@ -1062,8 +1153,10 @@ sys.path.insert(0, "../..")
 from guardrail import apply_brand_guardrail
 
 model = init_chat_model("claude-sonnet-4-6", temperature=0)
-inner_agent = create_react_agent(
-    model, tools=[get_internal_metrics, get_competitor_prices, get_review_sentiment], prompt=SYSTEM
+inner_agent = create_agent(
+    model,
+    tools=[get_internal_metrics, get_competitor_prices, get_review_sentiment],
+    system_prompt=SYSTEM,
 )
 
 
@@ -1117,10 +1210,56 @@ uv run python -c "from agent_graph import app; print(app.get_graph().draw_mermai
 
 The Mermaid output goes in your README. Now you have agent -> guardrail as an explicit graph.
 
+Add a `## LangGraph version` section to the README, between `## Architecture` and `## Run`. Paste the generated diagram in verbatim rather than tidying it by hand - the point is that it came from the compiled app, so it can't drift from the code:
+
+````markdown
+## LangGraph version
+
+`langgraph_version/` reimplements the same agent twice:
+
+- `agent_prebuilt.py` - the prebuilt ReAct agent (`create_agent`), tools only,
+  no guardrail.
+- `agent_graph.py` - a custom `StateGraph` that makes the guardrail an explicit
+  node, so the agent -> guardrail handoff is part of the graph rather than glue
+  code around it.
+
+The graph below is generated from the compiled app itself
+(`app.get_graph().draw_mermaid()`), not drawn by hand:
+
+```mermaid
+(paste the draw_mermaid() output here, including its --- config --- header)
+```
+
+The `agent` node runs the inner ReAct loop over the three tools and writes a
+draft into state; the `guardrail` node rewrites that draft for brand voice and
+records any violations it found.
+````
+
+Add the LangGraph commands under `## Run` too, so someone cloning the repo can reproduce the diagram:
+
+````markdown
+LangGraph versions:
+
+```bash
+cd langgraph_version
+uv run python agent_prebuilt.py GM-001    # prebuilt ReAct agent
+uv run python agent_graph.py GM-001       # custom graph with guardrail node
+
+# regenerate the Mermaid diagram above
+uv run python -c "from agent_graph import app; print(app.get_graph().draw_mermaid())"
+```
+````
+
+And one line under `## What this demonstrates`:
+
+```markdown
+- The same agent expressed as an explicit LangGraph state machine
+```
+
 Commit:
 
 ```bash
-git add langgraph_version/agent_graph.py
+git add langgraph_version/agent_graph.py README.md
 git commit -m "Day 10 (wk8): custom LangGraph graph with agent + guardrail nodes"
 ```
 
@@ -1544,7 +1683,7 @@ No code commit (config lives outside the repo), but capture screenshots for the 
 
 Write a strong `README.md`:
 
-```markdown
+````markdown
 # drupal-mcp-server
 
 An MCP server exposing Drupal development tools to any MCP-compatible AI
@@ -1567,11 +1706,11 @@ context into every prompt.
 
 ## Install
 
-\`\`\`bash
+```bash
 git clone https://github.com/rsnyd/drupal-mcp-server
 cd drupal-mcp-server
 uv sync
-\`\`\`
+```
 
 ## Use with Claude Desktop
 
@@ -1579,10 +1718,10 @@ uv sync
 
 ## Develop / test
 
-\`\`\`bash
+```bash
 npx @modelcontextprotocol/inspector uv run server.py
-\`\`\`
 ```
+````
 
 Tag a release on GitHub (v0.1.0). Optionally submit to a public MCP server directory (there are several registries now) for discoverability.
 
