@@ -6,8 +6,22 @@ e-commerce catalog. Given a product SKU, it gathers internal metrics,
 competitor prices, and review sentiment, then recommends pricing, inventory,
 and promotional actions - with a brand-voice guardrail and full observability.
 
-Built from scratch on the raw Anthropic SDK (orchestrator-workers pattern),
-then reimplemented in LangGraph for comparison (see `langgraph_version/`).
+The same agent is implemented three ways - raw Anthropic SDK, LangGraph and
+CrewAI - over the same tools, model and guardrail, and scored by one outcome
+eval, so the framework question gets answered with measurements rather than
+taste. [`IMPLEMENTATIONS.md`](IMPLEMENTATIONS.md) is the comparison and when to
+reach for which.
+
+| Implementation | File | Shape |
+| --- | --- | --- |
+| Raw SDK | `agent.py` | hand-written orchestrator-workers loop, full Langfuse tracing |
+| LangGraph prebuilt | `langgraph_version/agent_prebuilt.py` | `create_agent` ReAct loop, no guardrail |
+| LangGraph custom | `langgraph_version/agent_graph.py` | `StateGraph` with agent and guardrail nodes |
+| CrewAI | `crewai_demo.py` | analyst + brand copywriter crew, task guardrail |
+
+The short version: across 24 eval runs the four are indistinguishable on outcome
+scores. They differ in lines of code, latency, how visible the flow is, and how
+much of it Langfuse can see.
 
 ## Architecture
 
@@ -80,15 +94,31 @@ uv run python agent_graph.py GM-001       # custom graph with guardrail node
 uv run python -c "from agent_graph import app; print(app.get_graph().draw_mermaid())"
 ```
 
+CrewAI version:
+
+```bash
+uv run python crewai_demo.py GM-001
+```
+
 ## Evaluation
 
-Outcome evaluation against per-SKU reference expectations. See `evals/`.
+Outcome evaluation against per-SKU reference expectations, scored by an LLM
+judge, run across every implementation with measured lines of code and latency
+alongside the scores:
+
+```bash
+uv run python evals/agent_eval.py                                   # all four
+uv run python evals/agent_eval.py --impl raw-sdk langgraph-custom --trials 3
+```
+
+Results and caveats are in [`IMPLEMENTATIONS.md`](IMPLEMENTATIONS.md).
 
 ## What this demonstrates
 
 - Orchestrator-workers agent pattern (raw SDK, no framework)
 - Multi-tool use where tool outputs feed subsequent tool inputs
 - Evaluator-optimizer guardrail for output quality
-- The same agent expressed as an explicit LangGraph state machine
-- Full Langfuse observability (cost and latency per run)
-- Outcome + light trajectory evaluation
+- The same agent across raw SDK, LangGraph and CrewAI, compared on one eval
+- The guardrail as a loop call, a graph node, and a CrewAI task guardrail
+- Full Langfuse observability on the raw SDK path (cost and latency per run)
+- Outcome evaluation with an LLM judge against per-SKU reference expectations

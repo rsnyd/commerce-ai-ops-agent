@@ -100,13 +100,17 @@ JUDGE_TOOL = {
 def judge(sku: str, recommendation: str, ref: dict) -> dict:
     resp = client.messages.create(
         model="claude-sonnet-4-6",
-        max_tokens=512,
+        # reasoning is generated first and can run long; at 512 it ate the budget and
+        # the scores after it were silently dropped from the truncated tool input.
+        max_tokens=1500,
         system="You evaluate merchandising recommendations against expectations.",
         tools=[JUDGE_TOOL],
         tool_choice={"type": "tool", "name": "score"},
         messages=[{"role": "user", "content":
             f"SKU: {sku}\nMust address: {ref['must_address']}\nShould not: {ref['should_not']}\n\nRecommendation:\n{recommendation}"}],
     )
+    if resp.stop_reason == "max_tokens":
+        raise RuntimeError("judge hit max_tokens; tool input is truncated")
     for block in resp.content:
         if block.type == "tool_use":
             return block.input
@@ -146,12 +150,12 @@ def evaluate(name: str, trials: int) -> list[dict]:
             # that row, not the whole comparison.
             try:
                 rec = run(sku)
+                latency = time.perf_counter() - start
+                scores = judge(sku, rec, ref)
             except Exception as e:  # noqa: BLE001
                 print(f"  [error] {type(e).__name__}: {e}")
                 rows.append({"impl": name, "sku": sku, "error": f"{type(e).__name__}: {e}"})
                 continue
-            latency = time.perf_counter() - start
-            scores = judge(sku, rec, ref)
             print(f"  addresses_required: {scores['addresses_required']}/5")
             print(f"  grounded_in_data:   {scores['grounded_in_data']}/5")
             print(f"  avoided_errors:     {scores['avoided_errors']}")
