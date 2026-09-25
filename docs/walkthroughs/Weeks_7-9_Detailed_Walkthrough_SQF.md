@@ -1416,9 +1416,11 @@ MCP exploded through 2025-2026. Public directories list 2,000+ servers, OpenAI a
 
 You'll focus on tools, with one or two resources.
 
-### Concept: FastMCP
+### Concept: MCPServer (formerly FastMCP)
 
-The `mcp` Python SDK ships `FastMCP`, a decorator-based framework that turns typed Python functions into MCP-compliant tools automatically. You write a typed function with a docstring; FastMCP generates the schema, validates inputs, and handles the protocol. It's the standard way to build servers (powers ~70% of them).
+The `mcp` Python SDK ships `MCPServer`, a decorator-based framework that turns typed Python functions into MCP-compliant tools automatically. You write a typed function with a docstring; `MCPServer` generates the schema, validates inputs, and handles the protocol. It's the standard way to build servers (powers ~70% of them).
+
+Note on versions: this class was called `FastMCP` and lived at `mcp.server.fastmcp` in mcp 1.x. In mcp 2.x it was renamed to `MCPServer` at `mcp.server.mcpserver`. You'll see the old name throughout older tutorials and blog posts; the decorators (`@mcp.tool()`, `@mcp.resource()`) and `mcp.run()` work the same either way. See the [migration guide](https://py.sdk.modelcontextprotocol.io/v2/migration/#fastmcp-renamed-to-mcpserver), or pin `mcp<2` if you need to run v1 code unchanged.
 
 ### Reading (1 hour)
 
@@ -1455,9 +1457,9 @@ Create the GitHub repo `drupal-mcp-server` (personal account), set remote and co
 Run: uv run server.py
 Test: npx @modelcontextprotocol/inspector uv run server.py
 """
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
-mcp = FastMCP("drupal-dev")
+mcp = MCPServer("drupal-dev")
 
 
 @mcp.tool()
@@ -1687,7 +1689,7 @@ Write a strong `README.md`:
 # drupal-mcp-server
 
 An MCP server exposing Drupal development tools to any MCP-compatible AI
-assistant (Claude Desktop, Claude Code, Cursor, ChatGPT). Built with FastMCP.
+assistant (Claude Desktop, Claude Code, Cursor, ChatGPT). Built with MCPServer.
 
 Drupal + MCP is a near-empty intersection. This server lets an AI coding
 assistant work with Drupal conventions natively - explaining hooks, parsing
@@ -1745,7 +1747,7 @@ This is one of your highest-leverage publishing moves. Structure:
 1. **The hook**: AI coding assistants are great until they hit framework-specific conventions. Here's how I taught one to speak Drupal.
 2. **What MCP is** (briefly, for readers who don't know): write-once-use-everywhere tool protocol.
 3. **The tools I built** and why each is useful to a Drupal dev.
-4. **The build**: FastMCP, decorators, how little code it took.
+4. **The build**: MCPServer, decorators, how little code it took.
 5. **Using it in Claude Code/Desktop**: the screenshots, the payoff moment.
 6. **What's next**: wiring `explain_hook` to a live RAG index (ties back to your Weeks 1-4 work), more scaffolding tools.
 
