@@ -84,6 +84,12 @@ Three things the numbers say that the going-in expectations did not:
    same numbers and reached the same defensible conclusion; the expectation was
    written from "42 is above the reorder point of 30" alone. Four frameworks
    agreeing 12 times out of 12 is a strong hint the eval is what needs fixing.
+   *Follow-up (Week 10):* the conclusion held, but the reasoning didn't always.
+   Later GM-001 runs, on both the direct API and Bedrock, justified the reorder
+   by claiming 42 units was "already below" the reorder point of 30.
+   `get_internal_metrics` now returns `below_reorder_point` and
+   `units_above_reorder_point` so the model no longer does that comparison, and
+   the eval checks for the false claim.
 2. **CrewAI needed the guardrail least - because of its prompt, not its
    framework.** Its output averaged 0.7 guardrail violations a run with no
    forbidden words in any run; the raw and custom-graph arms averaged 2.3 and

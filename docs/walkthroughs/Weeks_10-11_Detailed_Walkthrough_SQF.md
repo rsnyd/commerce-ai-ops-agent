@@ -168,6 +168,7 @@ uv run python cloud/bedrock_hello_anthropic.py
 The repo version of `bedrock_hello.py` takes the model as a CLI arg or `BEDROCK_MODEL_ID` env var, using aliases `claude`, `sonnet-5` and `nova-lite`. That doubles as a quick access check for any model: `uv run python cloud/bedrock_hello.py us.anthropic.claude-haiku-4-5-20251001-v1:0`.
 
 Two gotchas:
+
 - If you switch Approach A to Sonnet 5 or newer, drop `temperature` from `inferenceConfig`. Those models reject sampling params with a 400.
 - Approach B is Claude-only. Nova and other non-Anthropic models need Converse.
 
@@ -197,9 +198,15 @@ Copy your `agent.py` and change only the client and model:
 ```python
 """Week 10 Day 3: Commerce agent running on Bedrock (AnthropicBedrock client)."""
 import json
+import sys
+from pathlib import Path
+
 from anthropic import AnthropicBedrock
 
-import tools
+# Running `python cloud/agent_bedrock.py` puts cloud/ on sys.path, not the repo
+# root - add it so the shared modules (agent, guardrail, tools) resolve.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 from guardrail import apply_brand_guardrail
 
 # The only real changes from agent.py: the client and the model ID
@@ -235,7 +242,6 @@ def run_agent_bedrock(sku: str, max_turns: int = 8) -> str:
 
 
 if __name__ == "__main__":
-    import sys
     sku = sys.argv[1] if len(sys.argv) > 1 else "GM-001"
     print(run_agent_bedrock(sku))
 ```
@@ -461,11 +467,13 @@ Certs don't win offers. Skills and portfolio win offers. But certs get you *past
 ### The two options (pick the one matching your Week 10 platform)
 
 **AWS Certified AI Practitioner (AIF-C01)**:
+
 - Foundational level, ~$100, ~30 hours of prep total
 - Covers: AI/ML/GenAI fundamentals, responsible AI, Bedrock, SageMaker basics, prompt engineering, security/governance
 - Exam guide: https://docs.aws.amazon.com/aws-certification/latest/examguides/ai-practitioner-01.html
 
 **Azure AI Engineer Associate (AI-102)**:
+
 - Associate level (harder), covers Azure AI services, Azure OpenAI, document intelligence, more
 - Learning path: https://learn.microsoft.com/en-us/credentials/certifications/azure-ai-engineer/
 

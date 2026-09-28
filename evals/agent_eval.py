@@ -44,7 +44,11 @@ client = Anthropic()
 REFERENCE = {
     "GM-001": {
         "must_address": ["price vs competitors", "inventory is healthy", "a promo angle grounded in positive reviews"],
-        "should_not": ["recommend an urgent reorder (stock is fine)"],
+        "should_not": [
+            "recommend an urgent reorder (stock is fine)",
+            # 42 on hand vs reorder point 30: runs have claimed it was already breached.
+            "claim inventory is already at or below the reorder point",
+        ],
     },
     "BB-002": {
         "must_address": ["flag low inventory / reorder needed", "price positioning", "a promo angle"],

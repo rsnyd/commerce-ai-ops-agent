@@ -28,7 +28,7 @@ MODEL = "claude-sonnet-4-6"
 TOOL_SCHEMAS = [
     {
         "name": "get_internal_metrics",
-        "description": "Get current inventory, 30-day sales velocity, current price, reorder point, and days of stock remaining for a product SKU. Call this first to understand the product's current state.",
+        "description": "Get current inventory, 30-day sales velocity, current price, reorder point, whether stock is below the reorder point (and by how many units / days it is above it), and days of stock remaining for a product SKU. Call this first to understand the product's current state.",
         "input_schema": {
             "type": "object",
             "properties": {"sku": {"type": "string", "description": "Product SKU, e.g. 'GM-001'"}},

@@ -21,7 +21,7 @@ llm = LLM(model="anthropic/claude-sonnet-4-6")
 # the tool description the agent sees.
 @tool("get_internal_metrics")
 def get_internal_metrics(sku: str) -> dict:
-    """Get inventory, sales velocity, price, reorder point, and days of stock left for a product SKU."""
+    """Get inventory, sales velocity, price, reorder point, whether stock is below it, and days of stock left for a product SKU."""
     return t.get_internal_metrics(sku)
 
 

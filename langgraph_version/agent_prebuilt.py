@@ -11,7 +11,7 @@ import tools as t
 # Wrap your existing functions as LangChain tools with the @tool decorator
 @tool
 def get_internal_metrics(sku: str) -> dict:
-    """Get inventory, sales velocity, price, and reorder point for a product SKU."""
+    """Get inventory, sales velocity, price, reorder point, whether stock is below it, and days of stock left for a product SKU."""
     return t.get_internal_metrics(sku)
 
 

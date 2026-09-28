@@ -159,11 +159,17 @@ def _load_mock() -> dict:
 
 
 def get_internal_metrics(sku: str) -> dict:
-    """Return inventory, sales velocity, price, and reorder point for a SKU."""
+    """Return inventory, sales velocity, price, and reorder point for a SKU.
+
+    The reorder comparison is computed here, not left to the model: given only
+    inventory 42 and reorder_point 30, agents have claimed stock is already below
+    the reorder point.
+    """
     data = _load_mock()
     if sku not in data:
         return {"error": f"SKU {sku} not found"}
     d = data[sku]
+    units_above = d["inventory"] - d["reorder_point"]
     return {
         "sku": sku,
         "name": d["name"],
@@ -172,6 +178,9 @@ def get_internal_metrics(sku: str) -> dict:
         "avg_daily_sales": d["avg_daily_sales"],
         "current_price": d["current_price"],
         "reorder_point": d["reorder_point"],
+        "below_reorder_point": d["inventory"] < d["reorder_point"],
+        "units_above_reorder_point": units_above,
+        "days_until_reorder_point": max(round(units_above / d["avg_daily_sales"], 1), 0),
         "days_of_stock_left": round(d["inventory"] / d["avg_daily_sales"], 1),
     }
 
@@ -285,7 +294,7 @@ MODEL = "claude-sonnet-4-6"
 TOOL_SCHEMAS = [
     {
         "name": "get_internal_metrics",
-        "description": "Get current inventory, 30-day sales velocity, current price, reorder point, and days of stock remaining for a product SKU. Call this first to understand the product's current state.",
+        "description": "Get current inventory, 30-day sales velocity, current price, reorder point, whether stock is below the reorder point (and by how many units / days it is above it), and days of stock remaining for a product SKU. Call this first to understand the product's current state.",
         "input_schema": {
             "type": "object",
             "properties": {"sku": {"type": "string", "description": "Product SKU, e.g. 'GM-001'"}},
@@ -395,6 +404,8 @@ uv run python agent.py BB-002
 ```
 
 Notice `BB-002` (Berbere) has inventory 12 with a reorder point of 20 - the agent should flag a reorder. That's the agent reasoning over tool data, not just summarizing it.
+
+Why does `get_internal_metrics` return `below_reorder_point` and `units_above_reorder_point` instead of letting the model compare `inventory` to `reorder_point` itself? Because it gets that comparison wrong: with only the raw numbers, GM-001 runs (42 on hand, reorder point 30) have reported the stock as "already below the reorder point." Anything deterministic - comparisons, arithmetic, thresholds - belongs in the tool. Leave the model to judge what the numbers mean.
 
 Commit:
 
@@ -862,7 +873,11 @@ client = Anthropic()
 REFERENCE = {
     "GM-001": {
         "must_address": ["price vs competitors", "inventory is healthy", "a promo angle grounded in positive reviews"],
-        "should_not": ["recommend an urgent reorder (stock is fine)"],
+        "should_not": [
+            "recommend an urgent reorder (stock is fine)",
+            # 42 on hand vs reorder point 30: runs have claimed it was already breached.
+            "claim inventory is already at or below the reorder point",
+        ],
     },
     "BB-002": {
         "must_address": ["flag low inventory / reorder needed", "price positioning", "a promo angle"],
@@ -1072,7 +1087,7 @@ import tools as t
 # Wrap your existing functions as LangChain tools with the @tool decorator
 @tool
 def get_internal_metrics(sku: str) -> dict:
-    """Get inventory, sales velocity, price, and reorder point for a product SKU."""
+    """Get inventory, sales velocity, price, reorder point, whether stock is below it, and days of stock left for a product SKU."""
     return t.get_internal_metrics(sku)
 
 

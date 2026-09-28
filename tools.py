@@ -47,11 +47,17 @@ def _load_mock() -> dict:
 
 
 def get_internal_metrics(sku: str) -> dict:
-    """Return inventory, sales velocity, price, and reorder point for a SKU."""
+    """Return inventory, sales velocity, price, and reorder point for a SKU.
+
+    The reorder comparison is computed here, not left to the model: given only
+    inventory 42 and reorder_point 30, agents have claimed stock is already below
+    the reorder point.
+    """
     data = _load_mock()
     if sku not in data:
         return {"error": f"SKU {sku} not found"}
     d = data[sku]
+    units_above = d["inventory"] - d["reorder_point"]
     return {
         "sku": sku,
         "name": d["name"],
@@ -60,6 +66,9 @@ def get_internal_metrics(sku: str) -> dict:
         "avg_daily_sales": d["avg_daily_sales"],
         "current_price": d["current_price"],
         "reorder_point": d["reorder_point"],
+        "below_reorder_point": d["inventory"] < d["reorder_point"],
+        "units_above_reorder_point": units_above,
+        "days_until_reorder_point": max(round(units_above / d["avg_daily_sales"], 1), 0),
         "days_of_stock_left": round(d["inventory"] / d["avg_daily_sales"], 1),
     }
 

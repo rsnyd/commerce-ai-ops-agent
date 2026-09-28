@@ -67,6 +67,11 @@ Ruled out while debugging Sonnet 5:
 - Sonnet 5 and newer reject sampling params (`temperature`/`top_p`), so the Converse script only sends `temperature=0` to non-Anthropic models. Carrying `temperature=0` over from Nova would 400 on those models. Sonnet 4.6 still accepts it. *(The Sonnet 5 behavior comes from the docs; I can't test it on this account.)*
 - The Anthropic SDK also ships `AnthropicBedrockMantle`, a newer client that calls Bedrock's Messages-API endpoint instead of `bedrock-runtime` InvokeModel. It's worth trying now that Claude access works. Note that it uses `anthropic.`-prefixed IDs rather than `us.` profiles.
 
+## Porting the agent (Day 3)
+
+- `uv run python cloud/agent_bedrock.py` failed with `ModuleNotFoundError: No module named 'tools'`. Python puts the script's directory (`cloud/`) on `sys.path`, not the repo root, and the project has no `[build-system]`, so nothing installs it. Fixed with the same `sys.path.insert` bootstrap `evals/agent_eval.py` uses. This problem comes from the repo layout, not from Bedrock.
+- On GM-001, Bedrock (Sonnet 4.6) gave the same recommendation as the direct API, including the same reasoning error: it called 42 units "below" a reorder point of 30. It's the same model with the same prompt, so the mistake carried over too. Fixed in `tools.py` (see IMPLEMENTATIONS.md).
+
 ## Still to measure (Day 5)
 
 - Latency: direct API vs Bedrock, same prompt.
