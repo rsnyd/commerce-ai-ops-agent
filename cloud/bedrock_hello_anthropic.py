@@ -5,7 +5,7 @@ other non-Anthropic models won't work here. Defaults to the "claude" alias;
 override with a CLI arg or BEDROCK_MODEL_ID, same as bedrock_hello.py:
 
     uv run python cloud/bedrock_hello_anthropic.py
-    uv run python cloud/bedrock_hello_anthropic.py global.anthropic.claude-sonnet-5
+    uv run python cloud/bedrock_hello_anthropic.py global.anthropic.claude-sonnet-4-6
 """
 import sys
 
@@ -29,7 +29,7 @@ def main() -> None:
             messages=[{"role": "user", "content": "In one sentence, what is Drupal Commerce?"}],
         )
     except anthropic.PermissionDeniedError as e:
-        # Expected until the Anthropic Marketplace agreement is in place (cloud/NOTES.md)
+        # Model not approved for this account, e.g. sonnet-5 (cloud/NOTES.md)
         print(f"ACCESS DENIED: {e.message}")
         sys.exit(1)
     except anthropic.APIStatusError as e:

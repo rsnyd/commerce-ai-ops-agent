@@ -20,12 +20,12 @@ REGION = "us-east-1"
 # bare model IDs fail with "on-demand throughput isn't supported".
 MODELS = {
     "nova-lite": "us.amazon.nova-lite-v1:0",
-    "claude": "us.anthropic.claude-sonnet-5",
+    "claude": "us.anthropic.claude-sonnet-4-6",
+    # Denied for this account by AWS (per-account approval, see cloud/NOTES.md)
+    "sonnet-5": "us.anthropic.claude-sonnet-5",
 }
 
-# Nova Lite while Anthropic Marketplace access is blocked (see cloud/NOTES.md).
-# Flip back to "claude" once access is enabled.
-DEFAULT_MODEL = "nova-lite"
+DEFAULT_MODEL = "claude"
 
 
 def resolve_model_id(argv: list[str], default: str = DEFAULT_MODEL) -> str:
@@ -42,8 +42,8 @@ def main() -> None:
         {"role": "user", "content": [{"text": "In one sentence, what is Drupal Commerce?"}]}
     ]
 
-    # Sonnet 5 rejects sampling params (temperature/top_p) with a 400, so only
-    # send temperature to non-Anthropic models.
+    # Sonnet 5 and newer Claude models reject sampling params (temperature/top_p)
+    # with a 400, so only send temperature to non-Anthropic models.
     inference_config = {"maxTokens": 512}
     if "anthropic." not in model_id:
         inference_config["temperature"] = 0

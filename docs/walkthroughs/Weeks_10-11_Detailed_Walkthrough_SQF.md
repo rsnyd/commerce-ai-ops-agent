@@ -80,15 +80,15 @@ Three things change when you move from direct API to Bedrock:
    aws configure
    # Enter access key, secret, region (us-east-1), output (json)
    ```
-5. Request Bedrock model access: AWS Console -> Bedrock -> Model access -> request access to the Anthropic Claude models. Approval is usually instant for Claude.
+5. Request Bedrock model access: submit Anthropic's use-case form (once per account) from the Bedrock console. Older Claude models (Sonnet 4.6, Haiku 4.5) were usable right away. **The newest models (Sonnet 5, Opus 5) need a separate per-account approval from AWS, and a new or low-usage account can be denied.** AWS Support's answer was that access depends on "regional factors, payment history, and account usage" and may open up over time. Plan on **Sonnet 4.6** for this phase.
 
-Verify access:
+List the Claude model IDs:
 
 ```bash
 aws bedrock list-foundation-models --by-provider anthropic --region us-east-1 --query "modelSummaries[].modelId" --output text
 ```
 
-You should see a list of available Claude model IDs.
+This lists the models that *exist* in the region, not the ones your account can *call*. `get-foundation-model-availability` doesn't help either: it showed `agreementAvailability: NOT_AVAILABLE` for every Claude model, including the ones that worked. The only reliable access check is a real call (Day 2's script with the model ID as an argument).
 
 **Azure path (if you chose Azure):**
 
@@ -116,9 +116,9 @@ from botocore.exceptions import ClientError
 
 client = boto3.client("bedrock-runtime", region_name="us-east-1")
 
-# Use an inference profile ID for current Claude models; check your
-# list-foundation-models output for the exact ID available in your region.
-MODEL_ID = "anthropic.claude-3-5-sonnet-20240620-v1:0"  # substitute the current Sonnet ID
+# Current Claude models need an inference profile ID (us. or global. prefix);
+# the bare model ID fails with "on-demand throughput isn't supported".
+MODEL_ID = "us.anthropic.claude-sonnet-4-6"
 
 conversation = [
     {"role": "user", "content": [{"text": "In one sentence, what is Drupal Commerce?"}]}
@@ -147,7 +147,7 @@ from anthropic import AnthropicBedrock
 client = AnthropicBedrock(aws_region="us-east-1")
 
 response = client.messages.create(
-    model="anthropic.claude-3-5-sonnet-20240620-v1:0",  # substitute current ID
+    model="us.anthropic.claude-sonnet-4-6",
     max_tokens=512,
     messages=[{"role": "user", "content": "In one sentence, what is Drupal Commerce?"}],
 )
@@ -158,11 +158,18 @@ Install and run:
 
 ```bash
 cd ~/projects/commerce-ai-ops-agent
-uv add boto3
+uv add boto3 "anthropic[bedrock]"
 mkdir cloud
-# create both files
+# create both files: cloud/bedrock_hello.py (A) and cloud/bedrock_hello_anthropic.py (B)
 uv run python cloud/bedrock_hello.py
+uv run python cloud/bedrock_hello_anthropic.py
 ```
+
+The repo version of `bedrock_hello.py` takes the model as a CLI arg or `BEDROCK_MODEL_ID` env var, using aliases `claude`, `sonnet-5` and `nova-lite`. That doubles as a quick access check for any model: `uv run python cloud/bedrock_hello.py us.anthropic.claude-haiku-4-5-20251001-v1:0`.
+
+Two gotchas:
+- If you switch Approach A to Sonnet 5 or newer, drop `temperature` from `inferenceConfig`. Those models reject sampling params with a 400.
+- Approach B is Claude-only. Nova and other non-Anthropic models need Converse.
 
 The two approaches return the same answer. Approach A (boto3 Converse) is the AWS-native, model-agnostic way - use it when you might swap Claude for Llama or Nova. Approach B (AnthropicBedrock) keeps your existing Anthropic SDK code nearly unchanged - use it when you're committed to Claude and want minimal code changes. Knowing both, and when to use each, is exactly the kind of nuance an SA interview rewards.
 
@@ -197,7 +204,7 @@ from guardrail import apply_brand_guardrail
 
 # The only real changes from agent.py: the client and the model ID
 client = AnthropicBedrock(aws_region="us-east-1")
-MODEL = "anthropic.claude-3-5-sonnet-20240620-v1:0"  # substitute current ID
+MODEL = "us.anthropic.claude-sonnet-4-6"
 
 # TOOL_SCHEMAS, TOOL_FUNCTIONS, SYSTEM_PROMPT: identical to agent.py
 # ... (import them from agent.py to avoid duplication) ...
@@ -260,7 +267,15 @@ A customer will ask "how do we control who can use this and what it can do?" The
 
 ### Project: Tighten IAM to least privilege
 
-Replace the broad `AmazonBedrockFullAccess` with a scoped policy that only allows invoking the specific models you use. Create a policy like:
+Replace the broad `AmazonBedrockFullAccess` with a scoped policy that only allows invoking the specific models you use.
+
+The inference-profile catch: a `us.` profile routes each request to one of several US regions. The policy therefore has to allow the **inference profile** *and* the **foundation model in every region the profile routes to**. A single us-east-1 `foundation-model` ARN will fail on requests routed elsewhere. List the regions with:
+
+```bash
+aws bedrock get-inference-profile --inference-profile-identifier us.anthropic.claude-sonnet-4-6 --region us-east-1 --query "models[].modelArn"
+```
+
+On 2026-09-28 that returned us-east-1, us-east-2 and us-west-2. Create a policy like:
 
 ```json
 {
@@ -269,11 +284,18 @@ Replace the broad `AmazonBedrockFullAccess` with a scoped policy that only allow
     {
       "Effect": "Allow",
       "Action": ["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"],
-      "Resource": "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-*"
+      "Resource": [
+        "arn:aws:bedrock:us-east-1:<ACCOUNT_ID>:inference-profile/us.anthropic.claude-sonnet-4-6",
+        "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-sonnet-4-6",
+        "arn:aws:bedrock:us-east-2::foundation-model/anthropic.claude-sonnet-4-6",
+        "arn:aws:bedrock:us-west-2::foundation-model/anthropic.claude-sonnet-4-6"
+      ]
     }
   ]
 }
 ```
+
+`bedrock:InvokeModel` also authorizes the Converse API; there's no separate Converse action. Keep your account ID out of the committed `iam-policy.json` by leaving the `<ACCOUNT_ID>` placeholder in the repo copy.
 
 Attach it, remove the full-access policy, and re-run your agent to confirm it still works with the tighter permissions. This is a small thing that demonstrates a big concept: principle of least privilege, which every enterprise security review cares about.
 
@@ -315,7 +337,8 @@ Document the gotchas you hit:
 
 - Not all Claude models are available in all regions. You may need to use an inference profile ID (cross-region routing) for newer models.
 - Bedrock has on-demand pricing and provisioned-throughput pricing (reserved capacity for predictable high volume). Know that provisioned throughput exists and when a customer would want it (steady high traffic, latency guarantees).
-- Global vs regional endpoints (newer Claude models on Bedrock offer both).
+- Global vs regional endpoints (newer Claude models on Bedrock offer both). This is a data-residency tradeoff: `us.` profiles keep requests in US regions, while `global.` can route them anywhere for more capacity. A compliance-sensitive customer wants the geographic profile.
+- Model access is approved per account and per model, and the newest models may be denied to new or low-usage accounts. It's a real procurement consideration: a customer planning to launch on the newest model should confirm access (or go through their AWS account team) before committing to a timeline.
 
 Write these into your deployment doc. They're the kind of operational detail that signals you've actually deployed, not just read about it.
 
@@ -352,11 +375,14 @@ the model is identical, only auth/region/billing differ.
 
 ## Authentication
 IAM user with a least-privilege policy scoped to bedrock:InvokeModel on
-the specific Claude model ARNs. (policy included: iam-policy.json)
+the inference profile plus the model ARN in each region it routes to.
+(policy included: iam-policy.json)
 
 ## Regional considerations
 - Model availability varies by region (us-east-1 used here)
-- Newer models may require inference profile IDs for cross-region routing
+- Newer models require inference profile IDs for cross-region routing;
+  us. (US-only) vs global. is a data-residency choice
+- Model access is approved per account; newest models may need AWS sign-off
 - On-demand vs provisioned-throughput pricing tradeoff
 
 ## Cost and latency (measured)
