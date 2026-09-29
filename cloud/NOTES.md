@@ -72,7 +72,8 @@ Ruled out while debugging Sonnet 5:
 - `uv run python cloud/agent_bedrock.py` failed with `ModuleNotFoundError: No module named 'tools'`. Python puts the script's directory (`cloud/`) on `sys.path`, not the repo root, and the project has no `[build-system]`, so nothing installs it. Fixed with the same `sys.path.insert` bootstrap `evals/agent_eval.py` uses. This problem comes from the repo layout, not from Bedrock.
 - On GM-001, Bedrock (Sonnet 4.6) gave the same recommendation as the direct API, including the same reasoning error: it called 42 units "below" a reorder point of 30. It's the same model with the same prompt, so the mistake carried over too. Fixed in `tools.py` (see IMPLEMENTATIONS.md).
 
-## Still to measure (Day 5)
+## Day 5 measurements
+
+Done - see `cost_analysis.md` (10 runs: 6,138 tokens, $0.029, 17.0s avg, 5 model calls per run; ~$880/month at 1,000 runs/day). Still open:
 
 - Latency: direct API vs Bedrock, same prompt.
-- Cost per agent run on Bedrock pricing vs direct.
