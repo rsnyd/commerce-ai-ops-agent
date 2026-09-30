@@ -1,5 +1,4 @@
 """Week 10 Day 3: Commerce agent running on Bedrock (AnthropicBedrock client)."""
-import json
 import sys
 from pathlib import Path
 
@@ -19,7 +18,7 @@ MODEL = "us.anthropic.claude-sonnet-4-6"
 
 # TOOL_SCHEMAS, TOOL_FUNCTIONS, SYSTEM_PROMPT: identical to agent.py
 # ... (import them from agent.py to avoid duplication) ...
-from agent import TOOL_SCHEMAS, SYSTEM_PROMPT, run_requested_tool
+from agent import TOOL_SCHEMAS, SYSTEM_PROMPT, final_text, run_requested_tool, tool_result_block
 
 
 # Day 5: traced the same way as agent.py, so a Bedrock run is one Langfuse trace
@@ -43,15 +42,18 @@ def run_agent_bedrock(sku: str, max_turns: int = 8) -> str:
         )
         if response.stop_reason == "end_turn":
             langfuse.update_current_span(metadata={"turns_used": turn + 1})
-            return apply_brand_guardrail(response.content[0].text)["revised_text"]
+            return apply_brand_guardrail(final_text(response))["revised_text"]
         if response.stop_reason == "tool_use":
             messages.append({"role": "assistant", "content": response.content})
             results = []
             for block in response.content:
                 if block.type == "tool_use":
-                    result = run_requested_tool(block)
-                    results.append({"type": "tool_result", "tool_use_id": block.id, "content": json.dumps(result)})
+                    results.append(tool_result_block(block, run_requested_tool(block)))
             messages.append({"role": "user", "content": results})
+            continue
+        # Same as agent.py: an unhandled stop_reason would resend the identical request.
+        langfuse.update_current_span(level="WARNING", status_message=f"stop_reason={response.stop_reason}")
+        return f"Agent stopped: unexpected stop_reason {response.stop_reason!r}."
     langfuse.update_current_span(level="WARNING", status_message="max turns reached")
     return "Max turns reached."
 

@@ -90,13 +90,37 @@ def run_requested_tool(block) -> dict:
     after the tool the model actually asked for. A decorator on this function would
     name every span "run_requested_tool" and the trace tree would be unreadable.
     """
-    fn = TOOL_FUNCTIONS[block.name]
     with langfuse.start_as_current_observation(
         name=block.name, as_type="tool", input=block.input
     ) as span:
-        result = fn(**block.input)
+        # A failing tool goes back to the model as an error result instead of
+        # crashing the run - it can retry with different input or recommend
+        # without that data. The lookup is inside the try so a tool name the
+        # model invented is handled the same way.
+        try:
+            result = TOOL_FUNCTIONS[block.name](**block.input)
+        except Exception as e:  # noqa: BLE001
+            result = {"error": f"{type(e).__name__}: {e}"}
+            span.update(level="ERROR", status_message=result["error"])
         span.update(output=result)
         return result
+
+
+def tool_result_block(block, result: dict) -> dict:
+    """The tool_result message block for one executed tool_use block."""
+    return {
+        "type": "tool_result",
+        "tool_use_id": block.id,
+        "content": json.dumps(result),
+        # Tools report failures as {"error": ...} (unknown SKU, exceptions above).
+        # is_error tells the model the call failed rather than returned data.
+        "is_error": "error" in result,
+    }
+
+
+def final_text(response) -> str:
+    """The text of a final response. content[0] is not guaranteed to be a text block."""
+    return "".join(block.text for block in response.content if block.type == "text")
 
 
 @observe(name="merchandising-agent", as_type="agent")
@@ -124,7 +148,7 @@ def run_agent(sku: str, max_turns: int = 8) -> str:
         )
 
         if response.stop_reason == "end_turn":
-            raw = response.content[0].text
+            raw = final_text(response)
             check = apply_brand_guardrail(raw)
             if not check["passes"]:
                 print(f"  [guardrail] violations: {check['violations']}")
@@ -145,13 +169,17 @@ def run_agent(sku: str, max_turns: int = 8) -> str:
                 if block.type == "tool_use":
                     print(f"  -> {block.name}({block.input})")
                     result = run_requested_tool(block)
-                    tool_results.append({
-                        "type": "tool_result",
-                        "tool_use_id": block.id,
-                        "content": json.dumps(result),
-                    })
+                    tool_results.append(tool_result_block(block, result))
 
             messages.append({"role": "user", "content": tool_results})
+            continue
+
+        # Any other stop_reason (max_tokens, refusal) matches neither branch above.
+        # Looping on would resend the identical request until max_turns ran out.
+        langfuse.update_current_span(
+            level="WARNING", status_message=f"stop_reason={response.stop_reason}"
+        )
+        return f"Agent stopped: unexpected stop_reason {response.stop_reason!r}."
 
     langfuse.update_current_span(level="WARNING", status_message="max turns reached")
     return "Agent stopped: max turns reached without a final recommendation."
