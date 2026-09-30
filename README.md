@@ -113,6 +113,30 @@ uv run python evals/agent_eval.py --impl raw-sdk langgraph-custom --trials 3
 
 Results and caveats are in [`IMPLEMENTATIONS.md`](IMPLEMENTATIONS.md).
 
+## Cloud Deployment
+
+The agent runs against two targets: the direct Anthropic API (`agent.py`) and
+AWS Bedrock (`cloud/agent_bedrock.py`). The Bedrock port changes only the client
+constructor and the model ID - the orchestration loop, tools, prompt and
+guardrail are shared - and is traced in Langfuse the same way.
+
+Bedrock is what an enterprise customer usually asks for: spend on the existing
+AWS bill, IAM instead of API keys, CloudTrail audit, and `us.` inference
+profiles to keep requests inside US regions.
+[`cloud/CLOUD_DEPLOYMENT.md`](cloud/CLOUD_DEPLOYMENT.md) covers the migration,
+the least-privilege IAM policy, regional and model-access gotchas, guardrail
+layering, and measured cost and latency: 5 model calls and ~$0.03 per run,
+~$900/month at 1,000 runs/day ([`cloud/cost_analysis.md`](cloud/cost_analysis.md)).
+
+One caveat, documented there: the orchestrator runs on Bedrock, but the
+guardrail and sentiment calls still use the direct API client.
+
+```bash
+# needs AWS credentials with the policy in cloud/iam-policy.json
+uv run python cloud/agent_bedrock.py GM-001
+uv run python cloud/measure_runs.py 10 GM-001   # cost/latency table from Langfuse
+```
+
 ## What this demonstrates
 
 - Orchestrator-workers agent pattern (raw SDK, no framework)
@@ -122,3 +146,5 @@ Results and caveats are in [`IMPLEMENTATIONS.md`](IMPLEMENTATIONS.md).
 - The guardrail as a loop call, a graph node, and a CrewAI task guardrail
 - Full Langfuse observability on the raw SDK path (cost and latency per run)
 - Outcome evaluation with an LLM judge against per-SKU reference expectations
+- The same agent running on the direct Anthropic API and on AWS Bedrock, with
+  least-privilege IAM and measured per-run cost and latency
